@@ -1,0 +1,501 @@
+---
+title: "Movies Ratings Database - PostgreSQL"
+author: "Claire Pang"
+output: html_document
+---
+
+```{r setup, include = F}
+knitr::opts_knit$set(sql.max.print = NA)
+```
+
+### About
+This project performs data processing on movie data and user ratings in R using regular expressions, then loading into a PostgreSQL database. We will perform various queries and do a debiasing of the database.
+
+This data set contains 10000054 ratings and 95580 tags applied to 10681 movies by 71567 users of the online movie recommender service MovieLens. Users were selected at random for inclusion. All users selected had rated at least 20 movies. Each user is represented by an id.   
+MovieID is the real MovieLens id and the title should be one identical to that on IMDB.   
+Ratings are made on a 5-star scale, with half-star increments.   
+Tags are user generated metadata about movies. Each tag is typically a single word, or short phrase. The meaning, value and purpose of a particular tag is determined by each user.   
+Timestamps represent seconds since midnight Coordinated Universal Time (UTC) of January 1, 1970.   
+
+This is the schema of our database:   
+
+**Entities**   
+movies(id, title, year)   
+genres(title)   
+users(id)   
+
+**Relationships**   
+ratings(userid, movieid, rating, time)   
+tags(userid, movieid, tag, time)   
+has_genre(movieid, title)  
+
+### Data processing
+In movies.txt, each line of this file represents one movie, and has the following format:   
+`MovieID:Title:Genres`  
+
+In tags.txt, each line of this file represents one tag applied to one movie by one user, and has the following format:   
+`UserID:MovieID:Tag:Timestamp`  
+
+In ratings.txt, each line of this file represents one rating of one movie by one user, and has the following format:   
+`UserID:MovieID:Rating:Timestamp` 
+
+The only file that can read in as is to Postgres is ratings.txt. The other files must be edited as there are delimiter errors.
+
+The following R code parses our files for us:
+
+```{r, eval = F}
+library(stringr)
+movies <- readLines("movies.txt")
+
+parseMovies <- function(movie){
+  # split by first ":"
+  temp <- unlist(str_split(movie, ":", 2))
+  movieid <- temp[1]
+  # looks for last "):"  
+  temp2 <- unlist(strsplit(temp[2], "\\):(?=[^:]+$)", perl=TRUE))
+  genres <- temp2[2]
+  
+  # looks for last "("
+  temp3 <- unlist(strsplit(temp2[1], " \\((?=[^(]+$)", perl=TRUE))
+  title <- temp3[1]
+  year <- temp3[2]
+  return(data.frame(movieid = movieid, title = title, year = year, genres = genres))
+}
+
+df <- data.frame(movieid = character(), title = character(), year = character(), genres = character())
+
+for (i in 1:length(movies)){
+  df <- rbind(df, parseMovies(movies[i]))
+}
+
+movies_csv <- df[,c("movieid", "title", "year")]
+write.csv(movies_csv, file ="movies.csv", row.names = F)
+
+has_genres <- df[,c("movieid", "genres")]
+genresList <- data.frame(movieid = character(), genre = character())
+for (i in 1:nrow(has_genres)){
+  list <- unlist(strsplit(as.character(has_genres[i,]$genres), split="\\|"))
+  for (j in 1:length(list))
+    genresList <- rbind(genresList, data.frame(movieid = has_genres[i,]$movieid, genre = list[j]))
+}
+
+write.csv(genresList, file ="hasGenres.csv", row.names = F)
+
+tags <- readLines("tags.txt")
+parseTags <- function(tag){
+  temp <- unlist(str_split(tag, ":", 3))
+  userid <- temp[1]
+  movieid <- temp[2]
+  # looks for the last ":"
+  temp2 <- unlist(strsplit(temp[3], ":(?=[^:]+$)", perl=TRUE))
+  tag <- temp2[1]
+  timestamp <- temp2[2]
+  return(data.frame(userid = userid, movieid = movieid, tag = tag, timestamp = timestamp))
+}
+
+tags_df <- data.frame(userid = character(), movieid = character(), tag = character(), timestamp = character())
+for (i in 1:length(tags)){
+  res <- parseTags(tags[i])
+  tags_df <- rbind(tags_df, res)
+  print(i)
+}
+
+write.csv(tags_df, file ="tags.csv", row.names = F)
+```
+
+### What does this code do?!
+
+### parseMovies
+See a sample of how parseMovies() parses movies.txt to create movies.csv, using the following input:
+
+`1:Toy Story (1995):Adventure|Animation|Children|Comedy|Fantasy`
+
+It first splits the line into two pieces on the first `:`.
+
+Array[1]: `1`   
+Array[2]: `Toy Story (1995):Adventure|Animation|Children|Comedy|Fantasy`   
+
+Array[1] contains the movieid. Then, it splits on the last `):` in Array[2] to split the year and genre list. By splitting on `):` and removing the genre list, it makes it easier to extract the year later.
+
+Array[1]: `Toy Story (1995`   
+Array[2]: `Adventure|Animation|Children|Comedy|Fantasy`   
+
+Array[2] contains the genre list. Next we should split Array[1] by looking for the last `(`. We look for the last `(` in case the movie title contains parentheses.
+
+Array[1]: `Toy Story`   
+Array[2]: `1995`   
+
+And we are left with the following variables:   
+
+**movieid:** `1`   
+**genres:** `Adventure|Animation|Children|Comedy|Fantasy`   
+**title:** `Toy Story`   
+**year:** `1995`   
+
+### parseTags
+See a sample of how parseTags() parses tags.txt to tags.csv, using the following input:
+
+`15:4973:excellent!:1215184630`
+
+It first splits the line into three pieces on the first and second `:`.
+
+Array[1]: `15`   
+Array[2]: `4973`   
+Array[3]: `excellent!:1215184630`
+
+The function then parses Array[3] on the last `:`. By parsing on the last `:`, if the tag contains a `:`, we ignore that.
+
+We are then left with the following variables:
+
+
+**userid:** `15`   
+**movieid:** `4973`   
+**tag<!-- -->:** `excellent!`  
+**timestamp:** `1215184630`
+
+### genresList
+Using the dataframe created after processing movies.txt, I then processed the genres to export to hasGenres.csv by converting the rows from:
+
+movieid: `1`   
+genres: `Adventure|Animation|Children|Comedy|Fantasy`
+
+To:
+
+
+movieid |	genre
+--------|------
+1	| Adventure
+1	| Animation
+1	| Children
+1	| Comedy
+1	| Fantasy
+
+The R script takes a row from the dataframe containing the columns `movieid`, `title`, `year`, `genres` and creates a new dataframe with `movieid` and `genre`. It splits `genres` on the `|` delimiter, and for each genre in the list, adds to the dataframe.
+
+
+### Connect to database in RMarkdown
+
+```{r, results = FALSE, message = FALSE, warning = FALSE}
+library(RPostgres)
+con <- dbConnect(RPostgres::Postgres(), host="localhost", dbname="moviedb", user="postgres", password="p")
+```
+We are connected!   
+Let's create our tables, and then add our data.
+
+```{sql, connection=con, eval = F}
+SET CLIENT_ENCODING TO 'utf8';
+
+CREATE TABLE Ratings(userid NUMERIC, movieid NUMERIC, rating DOUBLE PRECISION, timestamp NUMERIC);
+COPY ratings FROM 'C:/Users/claire/project/ratings.txt' DELIMITER ':';
+
+CREATE TABLE movies(movieid NUMERIC, title TEXT, year NUMERIC);
+COPY movies FROM 'C:/Users/claire/project/movies.csv' CSV HEADER;
+
+CREATE TABLE tags(userid NUMERIC, movieid NUMERIC, tag TEXT, time NUMERIC);
+COPY tags FROM 'C:/Users/claire/project/tags.csv' CSV HEADER;
+
+CREATE TABLE users(userid NUMERIC PRIMARY KEY);
+INSERT INTO users SELECT DISTINCT userid FROM ratings;
+INSERT INTO users SELECT DISTINCT userid FROM tags ON CONFLICT DO NOTHING;
+
+CREATE TABLE has_genre(movieid NUMERIC, genre TEXT);
+COPY has_genre FROM 'C:/Users/claire/project/hasGenres.csv' CSV HEADER;
+
+CREATE TABLE Genres(title TEXT);
+INSERT INTO Genres SELECT DISTINCT genre FROM has_genre ORDER BY genre;
+```
+
+**Looking at our tables**   
+Let's see how many rows we have and take a look at the first 5 rows of each table.   
+*Note that we are casting count(\*) as an integer only because RMarkdown has issues with integer-64 encodings.*
+
+**Movies table**
+```{sql, connection=con}
+SELECT CAST(count(*) AS INTEGER) FROM movies;
+```
+
+```{sql, connection=con}
+SELECT * FROM movies LIMIT 5;
+```
+
+**Ratings table**
+```{sql, connection=con}
+SELECT CAST(count(*) AS INTEGER) FROM ratings;
+```
+
+```{sql, connection=con}
+SELECT * FROM ratings LIMIT 5;
+```
+
+
+**Tags table**
+```{sql, connection=con}
+SELECT CAST(count(*) AS INTEGER) FROM tags;
+```
+
+```{sql, connection=con}
+SELECT * FROM tags LIMIT 5;
+```
+
+**Users table**
+```{sql, connection=con}
+SELECT CAST(count(*) AS INTEGER) FROM users;
+```
+
+```{sql, connection=con}
+SELECT * FROM users LIMIT 5;
+```
+
+**Has_genre table**
+```{sql, connection=con}
+SELECT CAST(count(*) AS INTEGER) FROM has_genre;
+```
+
+```{sql, connection=con}
+SELECT * FROM has_genre LIMIT 5;
+```
+
+Now let's try some more advanced queries to find out more about what's in our database.
+
+**Find the distribution of the movies across different decades.**
+```{sql, connection=con}
+SELECT dist_group, count(*)
+FROM
+(
+SELECT case when year between 1910 and 1919 then '(1910-1919)'
+when year between 1920 and 1929 then '(1920-1929)'
+when year between 1930 and 1939 then '(1930-1939)'
+when year between 1940 and 1949 then '(1940-1949)'
+when year between 1950 and 1959 then '(1950-1959)'
+when year between 1960 and 1969 then '(1960-1969)'
+when year between 1970 and 1979 then '(1970-1979)'
+when year between 1980 and 1989 then '(1980-1989)'
+when year between 1990 and 1999 then '(1990-1999)'
+when year between 2000 and 2009 then '(2000-2009)'
+end AS dist_group
+FROM movies
+) t
+GROUP BY dist_group
+ORDER BY dist_group ASC;
+```
+
+**A better approach in the case when we don’t know the distribution of years:**
+
+```{sql, connection=con}
+SELECT concat(floor(year/10), 0, '-', floor(year/10), 9) AS decade, count(*)
+FROM movies GROUP BY 1 ORDER BY 1 ASC;
+```
+
+
+**Find the distribution of the genres across the movies.**
+```{sql, connection=con}
+SELECT genre, count(genre)
+FROM has_genre
+GROUP BY genre
+ORDER BY genre ASC;
+```
+
+**Find the distribution of the ratings values.**
+```{sql, connection=con}
+SELECT rating, count(rating)
+FROM ratings
+GROUP BY rating
+ORDER BY rating ASC;
+```
+
+**Find how many movies have:**
+
+**i. no tags, but they have ratings**
+```{sql, connection=con}
+SELECT CAST(count(movieid) AS INTEGER) FROM movies
+WHERE movieid
+NOT IN (SELECT DISTINCT movieid FROM tags)
+AND movieid IN (SELECT DISTINCT movieid FROM ratings);
+```
+
+**ii. no ratings, but they have tags**
+```{sql, connection=con}
+SELECT CAST(count(movieid) AS INTEGER) FROM movies
+WHERE movieid
+IN (SELECT DISTINCT movieid FROM tags WHERE movieid NOT IN (SELECT DISTINCT movieid FROM ratings));
+```
+
+**iii. no tags and no ratings**
+```{sql, connection=con}
+SELECT CAST(count(movieid) AS INTEGER) FROM movies
+WHERE movieid
+NOT IN (SELECT DISTINCT movieid FROM ratings) AND movieid NOT IN (SELECT DISTINCT movieid FROM tags);
+```
+
+**iv. both tags and ratings**
+```{sql, connection=con}
+SELECT CAST(count(movieid) AS INTEGER) FROM movies
+WHERE movieid IN ((SELECT DISTINCT movieid FROM ratings) INTERSECT (SELECT DISTINCT movieid FROM tags));
+```
+
+We expect that the results from i, ii, iii, and iv will add up to count(movieid) from movies.
+3080 + 4 + 0 + 7597 = 10,681 (correct)
+
+**Find the most reviewed movie (the movie with the highest number of reviews).**
+```{sql, connection=con}
+SELECT movies.movieid, title, count_ratings
+FROM movies
+JOIN (SELECT count(*) AS count_ratings, movieid FROM ratings GROUP BY movieid ORDER BY count_ratings DESC LIMIT 1) t
+ON movies.movieid = t.movieid;
+```
+
+**Find the highest reviewed movie (movie with the most 5-star reviews).**
+```{sql, connection=con}
+SELECT movies.movieid, title, count
+FROM movies
+JOIN (SELECT movieid, count(*) AS count FROM ratings WHERE rating = 5 GROUP BY movieid ORDER BY count DESC LIMIT 1) t
+ON movies.movieid = t.movieid;
+```
+
+**Find the number of movies that are associated with at least 4 different genres.**
+```{sql, connection=con}
+SELECT CAST(count(*) AS INTEGER)
+FROM (SELECT count(genre) AS genre_count FROM has_genre GROUP BY movieid) t
+WHERE genre_count >= 4;
+```
+
+**Find the most popular genre across all movies (genre associated with the highest number of movies).**
+```{sql, connection=con}
+SELECT genre, count(genre)
+FROM has_genre
+GROUP BY genre
+ORDER BY count DESC LIMIT 1;
+```
+
+**Find the genres that are associated with the best reviews (genres of movies that have more high ratings than low ratings). Display the genre, the number of high ratings (>=4.0) and the number of low ratings (< 4.0).**
+```{sql, connection=con}
+SELECT genre, high_ratings, low_ratings FROM
+((SELECT genre,count(*) AS high_ratings FROM has_genre NATURAL JOIN ratings WHERE rating >= 4 GROUP BY genre) AS high
+NATURAL JOIN
+(SELECT genre,count(*) AS low_ratings FROM has_genre NATURAL JOIN ratings WHERE rating < 4 GROUP BY genre) AS low)
+WHERE high_ratings > low_ratings;
+```
+
+**Find the genres that are associated with the most recent movies (genres that have more recent movies than old movies). Display the genre, the number of recent movies (>=2000) and the number of old movies (< 2000).**
+```{sql, connection=con}
+SELECT genre, recent, old FROM
+((SELECT genre,count(*) AS recent FROM has_genre NATURAL JOIN movies WHERE year >= 2000 GROUP BY genre) AS recent
+NATURAL JOIN
+(SELECT genre,count(*) AS old FROM has_genre NATURAL JOIN movies WHERE year < 2000 GROUP BY genre) AS old)
+WHERE recent > old;
+```
+
+### Debiasing of the database
+**Goal:** De-bias the ratings of the users and find the top 10 movies (ids and titles) that had received the most biased ratings.   
+What does it mean for ratings to be biased? A user may rate all their movies with 5, or maybe, 1. We want to find these users and debias them. We will take a simple approach and debias those ratings by setting the rating = average rating for that movie. For users with a rating difference of 3 (arbitrary), we will replace the rating with the average.
+
+**Step 1:** Find the difference between a user's rating and the average rating of the movie he has rated.
+We will do this by creating a new table, 'ratings_with_diff', that includes all columns from table ratings, plus 2 new columns: avg rating and the difference (rating - avg_rating).
+
+•	First, we create a table ratings_with_diff(userid, movieid, rating, time) as a copy of ratings.      
+•	Alter the table to add columns avg_rating and difference. The schema is now ratings_with_diff(userid, movieid, rating, time, avg_rating, difference).    
+•	We create a table avg_ratings(movieid, avg_rating) that will contain the avg_rating for each movie, hence saving time populating ratings_with_diff later on. We then populate this table.    
+•	We then UPDATE the avg_rating in ratings_with_diff with the averages from avg_ratings.    
+•	We then UPDATE then difference column.   
+
+```{sql, connection=con, eval = F}
+DROP TABLE IF EXISTS ratings_with_diff;
+CREATE TABLE ratings_with_diff AS TABLE ratings;
+ALTER TABLE ratings_with_diff ADD COLUMN avg_rating DOUBLE PRECISION;
+ALTER TABLE ratings_with_diff ADD COLUMN difference DOUBLE PRECISION;
+DROP TABLE IF EXISTS avg_ratings;
+/* Helper table - avg_ratings, populate with averages by movie */
+CREATE TABLE avg_ratings(movieid NUMERIC, avg_rating DOUBLE PRECISION);
+INSERT INTO avg_ratings SELECT movieid, AVG(rating) AS avg_rating FROM ratings GROUP BY movieid;
+/* Insert averages into ratings_with_diff */
+UPDATE ratings_with_diff SET avg_rating = avg_ratings.avg_rating
+FROM avg_ratings
+WHERE ratings_with_diff.movieid = avg_ratings.movieid;
+/* Find difference */
+UPDATE ratings_with_diff SET difference = rating - avg_rating;
+```
+
+**Step 2:** Update the rating of users whose rating difference (absolute value) is > 3.
+```{sql, connection=con, eval = F}
+UPDATE ratings_with_diff r
+SET rating = (SELECT avg_rating FROM avg_ratings WHERE r.movieid = avg_ratings.movieid)
+WHERE @difference > 3;
+```
+
+**Step 3:** Find the new difference between a user's rating and the average rating of the movie he has rated.  
+•	We need to first take the new average of each movie. This will information will be stored in avg_ratings2.   
+•	Next, update ratings_with_diff with the new averages.   
+•	Then, find the new difference.   
+
+```{sql, connection=con, eval = F}
+/* Make new table with new averages */
+DROP TABLE IF EXISTS avg_ratings2;
+CREATE TABLE avg_ratings2(movieid NUMERIC, avg_rating DOUBLE PRECISION);
+INSERT INTO avg_ratings2 SELECT movieid, AVG(rating) AS avg_rating FROM ratings_with_diff GROUP BY movieid;
+/* Update ratings_with_diff with new averages */
+UPDATE ratings_with_diff
+SET avg_rating = avg_ratings2.avg_rating
+FROM avg_ratings2
+WHERE ratings_with_diff.movieid = avg_ratings2.movieid;
+/* Find new difference */
+UPDATE ratings_with_diff SET difference = rating - avg_rating;
+```
+
+**Step 4:** Again, update the rating of users whose rating difference (absolute value) is > 3. 
+
+```{sql, connection=con, eval = F}
+UPDATE ratings_with_diff r
+SET rating = (SELECT avg_rating FROM avg_ratings2 WHERE r.movieid = avg_ratings2.movieid)
+WHERE @difference > 3;
+```
+
+We end up with a table like this:
+
+```{sql, connection = con}
+SELECT * FROM ratings_with_diff LIMIT 5;
+```
+
+**Step 5:** Find the average rating for each movie before the de-biasing (from the ratings table) and the average rating for each movie after the de-biasing (from the ratings_with_diff table). List the top 10 movies that have the biggest difference between these two average ratings. (These are the movies that had the most biased ratings.)
+
+```{sql, connection=con}
+SELECT movieid, title, original, debiased, @original-debiased AS bias FROM
+(SELECT movieid, title FROM movies) t1
+NATURAL JOIN
+(SELECT movieid, avg_rating AS original FROM avg_ratings) t2
+NATURAL JOIN
+(SELECT movieid, AVG(rating) AS debiased FROM ratings_with_diff GROUP BY movieid) t3
+ORDER BY bias DESC LIMIT 10;
+```
+
+**Who is the most biased user?**    
+If we define bias as having the most rows changed during de-biasing:
+
+```{sql, connection=con}
+SELECT userid, count(*) FROM
+(SELECT userid, movieid, rating AS original FROM ratings_with_diff) t1
+NATURAL JOIN
+(SELECT userid, movieid, rating AS debiased FROM ratings) t2
+WHERE original <> debiased
+GROUP BY userid
+ORDER BY count(*) DESC
+LIMIT 1;
+```
+
+In this query, for each userid we counted the number of rows where the original rating did not equal the debiased rating.
+
+If we define bias as having the highest difference between original average and debiased average:
+
+```{sql, connection=con}
+SELECT userid, original, debiased, @original-debiased AS bias FROM
+(SELECT userid, AVG(rating) AS original FROM ratings GROUP BY userid) t2
+NATURAL JOIN
+(SELECT userid, AVG(rating) AS debiased FROM ratings_with_diff GROUP BY userid) t3
+ORDER BY bias DESC LIMIT 1;
+```
+
+In this query, for each userid, we calculated the average of their original ratings and the average of their debiased ratings, then took the difference between those two averages.
+
+```{r}
+# Disconnect the database
+dbDisconnect(con)
+```
